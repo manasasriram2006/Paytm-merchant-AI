@@ -228,9 +228,8 @@ class InvoiceApiTests(TestCase):
 
         app.dependency_overrides[get_invoice_ocr_service] = lambda: make_service(UnconfiguredOcrProvider())
         unavailable = client.post("/api/invoices/scan", files={"file": ("invoice.png", PNG_IMAGE, "image/png")})
-        self.assertEqual(unavailable.status_code, 200)
-        self.assertEqual(unavailable.json()["status"], "ocr_unavailable")
-        self.assertEqual(unavailable.json()["message"], "OCR provider is not configured.")
+        self.assertEqual(unavailable.status_code, 503)
+        self.assertEqual(unavailable.json()["detail"], "OCR provider is not configured.")
 
         app.dependency_overrides[get_invoice_ocr_service] = lambda: make_service(FakeOcrProvider(error=OcrProviderError("OCR request failed.")))
         failed = client.post("/api/invoices/scan", files={"file": ("invoice.png", PNG_IMAGE, "image/png")})

@@ -116,17 +116,8 @@ class InvoiceOcrService:
         try:
             raw_invoice = await self.provider.extract_invoice(content, image["filename"])
             invoice = self._normalize_invoice(invoice_id, image["filename"], raw_invoice)
-        except OcrUnavailableError as exc:
-            invoice = {
-                "invoice_id": invoice_id,
-                "filename": image["filename"],
-                "status": InvoiceStatus.OCR_UNAVAILABLE,
-                "processing_status": "ocr_unavailable",
-                "message": str(exc),
-                "metadata": _empty_metadata(),
-                "items": [],
-                "warnings": [],
-            }
+        except OcrUnavailableError:
+            raise
         except OcrExtractionError:
             invoice = {
                 "invoice_id": invoice_id,
