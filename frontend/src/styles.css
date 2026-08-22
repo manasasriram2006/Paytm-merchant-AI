@@ -1,0 +1,23 @@
+@import "tailwindcss";
+
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #172337;
+  background: #f6f8fb;
+}
+
+body {
+  margin: 0;
+}
+
+button, input {
+  font: inherit;
+}
+
+.paytm-text {
+  color: #00baf2;
+}
+
+.paytm-dark {
+  color: #002970;
+}
