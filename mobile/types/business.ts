@@ -32,3 +32,14 @@ export type InventoryItem = {
 export type InventoryResponse = { items: InventoryItem[]; lowStock: InventoryItem[] };
 export type InventoryRisk = { Brand?: string; Category?: string; Stock_On_Hand?: number; Reorder_Level?: number; Lead_Time_Days?: number; stock_gap?: number };
 export type InventoryDataSummary = { inventory_records?: number; items_below_reorder_level?: number; potential_inventory_risk?: InventoryRisk[] };
+
+export type ForecastPoint = { date: string; revenue: number; units: number; lower_bound?: number; upper_bound?: number };
+export type ForecastResponse = {
+  horizon: number;
+  historical: ForecastPoint[];
+  forecast: ForecastPoint[];
+  summary?: { expected_revenue?: number; expected_units?: number; average_daily_revenue?: number };
+  insights?: string[];
+  note?: string;
+  message?: string;
+};
