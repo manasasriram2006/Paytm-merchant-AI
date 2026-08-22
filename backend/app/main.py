@@ -17,6 +17,7 @@ from .models import (
     CustomerSummaryResponse,
     InvoiceActionResponse,
     InvoiceConfirmRequest,
+    InvoiceScanResponse,
     InventoryUpdateRequest,
     MerchantProfile,
     VoiceHealthResponse,
@@ -25,6 +26,7 @@ from .models import (
     VoiceTranscriptionResponse,
 )
 from .services.customer_intelligence_service import CustomerIntelligenceService, CustomerNotFoundError
+from .services.ai_provider import get_ai_provider
 from .services.data_service import DataService
 from .services.forecasting_service import ForecastingService
 from .services.invoice_ocr_service import (
@@ -45,9 +47,6 @@ from .services.voice_ai_service import (
 )
 from db.database import DatabaseConnectionError, check_database_connection, get_connected_database_name, get_db
 from db.schemas import DatabaseHealth
-
-
-invoice_review_store = InvoiceReviewStore()
 
 
 def get_data_service(settings: Settings = Depends(get_settings)) -> DataService:
@@ -76,9 +75,10 @@ def get_inventory_service(db: Session = Depends(get_db)) -> InventoryService:
 
 def get_invoice_ocr_service(
     settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
     inventory_service: InventoryService = Depends(get_inventory_service),
 ) -> InvoiceOcrService:
-    return InvoiceOcrService(get_ocr_provider(settings.ocr_provider), inventory_service, invoice_review_store)
+    return InvoiceOcrService(get_ocr_provider(settings.ocr_provider), inventory_service, InvoiceReviewStore(db))
 
 
 def get_smart_inventory_service(
@@ -94,12 +94,19 @@ def get_sarvam_client(settings: Settings = Depends(get_settings)) -> SarvamClien
 
 
 def get_business_ai_service(
+    settings: Settings = Depends(get_settings),
     data_service: DataService = Depends(get_data_service),
     forecasting_service: ForecastingService = Depends(get_forecasting_service),
     inventory_ai: SmartInventoryService = Depends(get_smart_inventory_service),
     customer_service: CustomerIntelligenceService = Depends(get_customer_intelligence_service),
 ) -> BusinessAIService:
-    return BusinessAIService(data_service, forecasting_service, inventory_ai, customer_service)
+    return BusinessAIService(
+        data_service,
+        forecasting_service,
+        inventory_ai,
+        customer_service,
+        ai_provider=get_ai_provider(settings.ai_provider, settings.sarvam_api_key),
+    )
 
 
 @asynccontextmanager
@@ -187,10 +194,12 @@ def voice_synthesize(payload: VoiceSynthesisRequest, sarvam: SarvamClient = Depe
 @app.post("/api/ai/chat", response_model=AIChatResponse)
 def ai_chat(payload: AIChatRequest, business_ai: BusinessAIService = Depends(get_business_ai_service)) -> dict:
     try:
-        return business_ai.chat(payload.message, payload.language)
+        return business_ai.chat(payload.message, payload.language, payload.conversation_id)
+    except VoiceAIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except TransactionDataError as exc:
+    except (RuntimeError, TransactionDataError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -347,6 +356,11 @@ def transaction_monthly(
     return _transaction_response(transaction_data.time_series, "monthly", start_date, end_date)
 
 
+@app.get("/api/analytics")
+def analytics(transaction_data: TransactionDataService = Depends(get_transaction_data_service)) -> dict:
+    return _transaction_response(transaction_data.business_analytics)
+
+
 @app.get("/api/analytics/products")
 def product_analytics(transaction_data: TransactionDataService = Depends(get_transaction_data_service)) -> dict:
     return _transaction_response(transaction_data.product_analytics)
@@ -451,7 +465,7 @@ def update_inventory(
     return inventory_service.apply_text_update(payload.text)
 
 
-@app.post("/api/invoices/scan")
+@app.post("/api/invoices/scan", response_model=InvoiceScanResponse)
 async def scan_invoice(
     file: UploadFile = File(...),
     invoice_service: InvoiceOcrService = Depends(get_invoice_ocr_service),
@@ -463,14 +477,18 @@ async def scan_invoice(
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.get("/api/invoices/{invoice_id}")
+@app.get("/api/invoices/{invoice_id}", response_model=InvoiceScanResponse)
 def get_invoice(invoice_id: str, invoice_service: InvoiceOcrService = Depends(get_invoice_ocr_service)) -> dict:
     try:
         return invoice_service.get_invoice(invoice_id)
     except InvoiceNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/invoices/{invoice_id}/confirm", response_model=InvoiceActionResponse)
@@ -485,6 +503,8 @@ def confirm_invoice(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/invoices/{invoice_id}/reject", response_model=InvoiceActionResponse)
@@ -495,6 +515,8 @@ def reject_invoice(invoice_id: str, invoice_service: InvoiceOcrService = Depends
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/invoice/ocr")

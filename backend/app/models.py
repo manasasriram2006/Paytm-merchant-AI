@@ -13,13 +13,27 @@ class AskRequest(BaseModel):
 
 class AIChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
+    conversation_id: str | None = Field(default=None, max_length=128)
     language: str = Field(default="en")
 
 
+class AIRecommendation(BaseModel):
+    priority: str
+    category: str
+    title: str
+    reason: str
+    action: str
+
+
 class AIChatResponse(BaseModel):
-    response: str
+    answer: str
     intent: str
-    data: dict[str, Any]
+    supporting_data: dict[str, Any]
+    recommendations: list[AIRecommendation] = Field(default_factory=list)
+    conversation_id: str | None = None
+    provider_status: dict[str, Any] = Field(default_factory=dict)
+    sources: list[str] = Field(default_factory=list)
+    suggested_followups: list[str] = Field(default_factory=list)
 
 
 class VoiceTranscriptionResponse(BaseModel):
@@ -62,11 +76,26 @@ class InvoiceConfirmRequest(BaseModel):
     items: list[ConfirmedInvoiceItem] = Field(default_factory=list)
 
 
+class InvoiceScanResponse(BaseModel):
+    invoice_id: str
+    filename: str
+    status: str
+    processing_status: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[Any] = Field(default_factory=list)
+    message: str | None = None
+    confirmed_items: list[dict[str, Any]] | None = None
+    inventory_update_status: str | None = None
+
+
 class InvoiceActionResponse(BaseModel):
     invoice_id: str
     status: str
     processing_status: str
     warnings: list[Any] = Field(default_factory=list)
+    confirmed_items: list[dict[str, Any]] | None = None
+    inventory_update_status: str | None = None
 
 
 class MerchantProfile(BaseModel):

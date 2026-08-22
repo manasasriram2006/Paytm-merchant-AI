@@ -129,28 +129,28 @@ class VoiceAIServiceTests(TestCase):
 
     def test_intent_detection(self) -> None:
         self.assertEqual(detect_intent("How are my sales?"), BusinessIntent.SALES_ANALYTICS)
-        self.assertEqual(detect_intent("What should I restock?"), BusinessIntent.INVENTORY_RECOMMENDATION)
-        self.assertEqual(detect_intent("What will sell this weekend?"), BusinessIntent.DEMAND_FORECAST)
-        self.assertEqual(detect_intent("Who are my best customers?"), BusinessIntent.CUSTOMER_INSIGHTS)
-        self.assertEqual(detect_intent("How is my business doing?"), BusinessIntent.BUSINESS_HEALTH)
+        self.assertEqual(detect_intent("What should I restock?"), BusinessIntent.INVENTORY)
+        self.assertEqual(detect_intent("What will sell this weekend?"), BusinessIntent.FORECAST)
+        self.assertEqual(detect_intent("Who are my best customers?"), BusinessIntent.CUSTOMERS)
+        self.assertEqual(detect_intent("How is my business doing?"), BusinessIntent.BUSINESS_RECOMMENDATION)
         self.assertEqual(detect_intent("Tell me something random"), BusinessIntent.UNKNOWN)
 
     def test_business_chat_routes_inventory_forecasting_customer_and_analytics(self) -> None:
         service = business_ai()
 
-        self.assertEqual(service.chat("What should I restock?")["intent"], "INVENTORY_RECOMMENDATION")
-        self.assertIn("Milk 500ml", service.chat("What should I restock?")["response"])
-        self.assertEqual(service.chat("What will sell this weekend?")["intent"], "DEMAND_FORECAST")
-        self.assertEqual(service.chat("Who are my best customers?")["intent"], "CUSTOMER_INSIGHTS")
+        self.assertEqual(service.chat("What should I restock?")["intent"], "INVENTORY")
+        self.assertIn("Milk 500ml", service.chat("What should I restock?")["answer"])
+        self.assertEqual(service.chat("What will sell this weekend?")["intent"], "FORECAST")
+        self.assertEqual(service.chat("Who are my best customers?")["intent"], "CUSTOMERS")
         self.assertEqual(service.chat("How are my sales?")["intent"], "SALES_ANALYTICS")
-        self.assertEqual(service.chat("How is my business doing?")["intent"], "BUSINESS_HEALTH")
+        self.assertEqual(service.chat("How is my business doing?")["intent"], "BUSINESS_RECOMMENDATION")
 
     def test_unknown_query_returns_safe_response(self) -> None:
         result = business_ai().chat("Can you predict lottery numbers?")
 
         self.assertEqual(result["intent"], "UNKNOWN")
-        self.assertEqual(result["data"], {})
-        self.assertIn("could not match", result["response"])
+        self.assertEqual(result["supporting_data"], {})
+        self.assertIn("could not match", result["answer"])
 
     def test_voice_transcription_and_query_endpoints_use_mocked_sarvam(self) -> None:
         app.dependency_overrides[get_sarvam_client] = lambda: FakeSarvamClient()
@@ -169,7 +169,7 @@ class VoiceAIServiceTests(TestCase):
             files={"file": ("question.wav", b"audio-bytes", "audio/wav")},
         )
         self.assertEqual(query.status_code, 200)
-        self.assertEqual(query.json()["intent"], "INVENTORY_RECOMMENDATION")
+        self.assertEqual(query.json()["intent"], "INVENTORY")
 
     def test_ai_chat_endpoint(self) -> None:
         app.dependency_overrides[get_business_ai_service] = business_ai
@@ -177,7 +177,9 @@ class VoiceAIServiceTests(TestCase):
 
         response = client.post("/api/ai/chat", json={"message": "What will sell this weekend?", "language": "en"})
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["intent"], "DEMAND_FORECAST")
+        self.assertEqual(response.json()["intent"], "FORECAST")
+        self.assertIn("answer", response.json())
+        self.assertIn("supporting_data", response.json())
 
     def test_synthesize_endpoint_returns_audio_or_clean_error(self) -> None:
         app.dependency_overrides[get_sarvam_client] = lambda: FakeSarvamClient()

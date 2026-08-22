@@ -56,6 +56,17 @@ class FakeInventoryService:
         return {"status": "updated", "confirmed_items": confirmed, "warnings": warnings}
 
 
+class BrokenInvoiceService:
+    def get_invoice(self, invoice_id: str) -> dict:
+        raise RuntimeError("Could not retrieve invoice data.")
+
+    def confirm(self, invoice_id: str, confirmed_items: list[dict]) -> dict:
+        raise RuntimeError("Could not persist invoice data.")
+
+    def reject(self, invoice_id: str) -> dict:
+        raise RuntimeError("Could not persist invoice data.")
+
+
 def valid_ocr_result() -> dict:
     return {
         "metadata": {
@@ -129,6 +140,19 @@ class InvoiceOcrServiceTests(IsolatedAsyncioTestCase):
         self.assertIsNone(invoice["items"][0]["matched_product"])
         self.assertIn("requires_product_mapping", invoice["items"][0]["review_reasons"])
 
+    async def test_invalid_date_and_numeric_fields_return_validation_warnings(self) -> None:
+        result = valid_ocr_result()
+        result["metadata"]["invoice_date"]["value"] = "20/08/2026"
+        result["items"][0]["quantity"]["value"] = "ten"
+        result["items"][0]["unit_price"]["value"] = -5
+
+        invoice = await make_service(FakeOcrProvider(result)).scan("invoice.png", "image/png", PNG_IMAGE)
+
+        self.assertTrue(invoice["metadata"]["invoice_date"]["requires_review"])
+        self.assertIn("invalid_quantity", invoice["items"][0]["review_reasons"])
+        self.assertIn("invalid_unit_price", invoice["items"][0]["review_reasons"])
+        self.assertTrue(any(warning.get("field") == "invoice_date" for warning in invoice["warnings"] if isinstance(warning, dict)))
+
     async def test_no_inventory_update_before_confirmation_then_confirmation_updates(self) -> None:
         inventory = FakeInventoryService()
         service = make_service(inventory=inventory)
@@ -154,6 +178,13 @@ class InvoiceOcrServiceTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(rejected["status"], InvoiceStatus.REJECTED)
         self.assertEqual(inventory.update_calls, 0)
+
+    async def test_confirmation_requires_items(self) -> None:
+        service = make_service()
+        invoice = await service.scan("invoice.png", "image/png", PNG_IMAGE)
+
+        with self.assertRaisesRegex(ValueError, "At least one"):
+            service.confirm(invoice["invoice_id"], [])
 
 
 class InvoiceApiTests(TestCase):
@@ -197,13 +228,26 @@ class InvoiceApiTests(TestCase):
 
         app.dependency_overrides[get_invoice_ocr_service] = lambda: make_service(UnconfiguredOcrProvider())
         unavailable = client.post("/api/invoices/scan", files={"file": ("invoice.png", PNG_IMAGE, "image/png")})
-        self.assertEqual(unavailable.status_code, 503)
-        self.assertEqual(unavailable.json()["detail"], "OCR provider is not configured.")
+        self.assertEqual(unavailable.status_code, 200)
+        self.assertEqual(unavailable.json()["status"], "ocr_unavailable")
+        self.assertEqual(unavailable.json()["message"], "OCR provider is not configured.")
 
         app.dependency_overrides[get_invoice_ocr_service] = lambda: make_service(FakeOcrProvider(error=OcrProviderError("OCR request failed.")))
         failed = client.post("/api/invoices/scan", files={"file": ("invoice.png", PNG_IMAGE, "image/png")})
         self.assertEqual(failed.status_code, 502)
         self.assertEqual(failed.json()["detail"], "OCR request failed.")
+
+    def test_database_failures_return_clean_json(self) -> None:
+        client = TestClient(app)
+        app.dependency_overrides[get_invoice_ocr_service] = BrokenInvoiceService
+
+        fetched = client.get("/api/invoices/inv_1")
+        self.assertEqual(fetched.status_code, 500)
+        self.assertEqual(fetched.json()["detail"], "Could not retrieve invoice data.")
+
+        confirmed = client.post("/api/invoices/inv_1/confirm", json={"items": [{"product_id": 1, "quantity": 1}]})
+        self.assertEqual(confirmed.status_code, 500)
+        self.assertEqual(confirmed.json()["detail"], "Could not persist invoice data.")
 
 
 if __name__ == "__main__":

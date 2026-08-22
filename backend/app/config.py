@@ -11,7 +11,9 @@ class Settings(BaseSettings):
     data_dir: Path = Path(__file__).resolve().parents[2] / "data"
     llm_provider: str = "mock"
     llm_api_key: str | None = None
-    ocr_provider: str = "mock"
+    ai_provider: str | None = Field(default=None, alias="AI_PROVIDER")
+    ai_api_key: str | None = Field(default=None, alias="AI_API_KEY")
+    ocr_provider: str = "unconfigured"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     database_url: str | None = Field(default=None, alias="DATABASE_URL")
     sarvam_api_key: str | None = Field(default=None, alias="SARVAM_API_KEY")
