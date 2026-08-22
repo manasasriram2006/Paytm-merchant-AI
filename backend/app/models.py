@@ -47,6 +47,28 @@ class VoiceHealthResponse(BaseModel):
     tts_available: bool
 
 
+class ConfirmedInvoiceItem(BaseModel):
+    item_id: str | None = None
+    product_name: str | None = None
+    quantity: int = Field(..., gt=0)
+    product_id: int | None = None
+    matched_product_id: int | None = None
+    unit_price: float | None = Field(default=None, ge=0)
+    total_price: float | None = Field(default=None, ge=0)
+    unit: str | None = None
+
+
+class InvoiceConfirmRequest(BaseModel):
+    items: list[ConfirmedInvoiceItem] = Field(default_factory=list)
+
+
+class InvoiceActionResponse(BaseModel):
+    invoice_id: str
+    status: str
+    processing_status: str
+    warnings: list[Any] = Field(default_factory=list)
+
+
 class MerchantProfile(BaseModel):
     business_name: str
     business_type: str

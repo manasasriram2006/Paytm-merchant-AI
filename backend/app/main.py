@@ -15,6 +15,8 @@ from .models import (
     CustomerRecommendationsResponse,
     CustomerSegmentsResponse,
     CustomerSummaryResponse,
+    InvoiceActionResponse,
+    InvoiceConfirmRequest,
     InventoryUpdateRequest,
     MerchantProfile,
     VoiceHealthResponse,
@@ -25,9 +27,14 @@ from .models import (
 from .services.customer_intelligence_service import CustomerIntelligenceService, CustomerNotFoundError
 from .services.data_service import DataService
 from .services.forecasting_service import ForecastingService
+from .services.invoice_ocr_service import (
+    InvoiceNotFoundError,
+    InvoiceOcrService,
+    InvoiceReviewStore,
+)
 from .services.inventory_service import InventoryService
 from .services.llm import get_llm_provider
-from .services.ocr import get_ocr_provider
+from .services.ocr import OcrError, get_ocr_provider
 from .services.smart_inventory_service import ProductNotFoundError, SmartInventoryService
 from .services.transaction_data_service import TransactionDataError, TransactionDataService
 from .services.voice_ai_service import (
@@ -38,6 +45,9 @@ from .services.voice_ai_service import (
 )
 from db.database import DatabaseConnectionError, check_database_connection, get_connected_database_name, get_db
 from db.schemas import DatabaseHealth
+
+
+invoice_review_store = InvoiceReviewStore()
 
 
 def get_data_service(settings: Settings = Depends(get_settings)) -> DataService:
@@ -62,6 +72,13 @@ def get_customer_intelligence_service(
 
 def get_inventory_service(db: Session = Depends(get_db)) -> InventoryService:
     return InventoryService(db)
+
+
+def get_invoice_ocr_service(
+    settings: Settings = Depends(get_settings),
+    inventory_service: InventoryService = Depends(get_inventory_service),
+) -> InvoiceOcrService:
+    return InvoiceOcrService(get_ocr_provider(settings.ocr_provider), inventory_service, invoice_review_store)
 
 
 def get_smart_inventory_service(
@@ -434,11 +451,60 @@ def update_inventory(
     return inventory_service.apply_text_update(payload.text)
 
 
+@app.post("/api/invoices/scan")
+async def scan_invoice(
+    file: UploadFile = File(...),
+    invoice_service: InvoiceOcrService = Depends(get_invoice_ocr_service),
+) -> dict:
+    content = await file.read()
+    try:
+        return await invoice_service.scan(file.filename, file.content_type, content)
+    except OcrError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/invoices/{invoice_id}")
+def get_invoice(invoice_id: str, invoice_service: InvoiceOcrService = Depends(get_invoice_ocr_service)) -> dict:
+    try:
+        return invoice_service.get_invoice(invoice_id)
+    except InvoiceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/invoices/{invoice_id}/confirm", response_model=InvoiceActionResponse)
+def confirm_invoice(
+    invoice_id: str,
+    payload: InvoiceConfirmRequest,
+    invoice_service: InvoiceOcrService = Depends(get_invoice_ocr_service),
+) -> dict:
+    try:
+        return invoice_service.confirm(invoice_id, [item.model_dump() for item in payload.items])
+    except InvoiceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/invoices/{invoice_id}/reject", response_model=InvoiceActionResponse)
+def reject_invoice(invoice_id: str, invoice_service: InvoiceOcrService = Depends(get_invoice_ocr_service)) -> dict:
+    try:
+        return invoice_service.reject(invoice_id)
+    except InvoiceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/api/invoice/ocr")
 async def invoice_ocr(file: UploadFile = File(...), app_settings: Settings = Depends(get_settings)) -> dict:
     content = await file.read()
     provider = get_ocr_provider(app_settings.ocr_provider)
-    items = await provider.extract_invoice_items(content, file.filename or "invoice")
+    try:
+        items = await provider.extract_invoice_items(content, file.filename or "invoice")
+    except OcrError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return {
         "filename": file.filename,
         "provider": app_settings.ocr_provider,
