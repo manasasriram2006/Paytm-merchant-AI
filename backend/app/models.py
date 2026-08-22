@@ -1,3 +1,5 @@
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -7,6 +9,42 @@ class InventoryUpdateRequest(BaseModel):
 
 class AskRequest(BaseModel):
     question: str = Field(..., min_length=3)
+
+
+class AIChatRequest(BaseModel):
+    message: str = Field(..., min_length=1)
+    language: str = Field(default="en")
+
+
+class AIChatResponse(BaseModel):
+    response: str
+    intent: str
+    data: dict[str, Any]
+
+
+class VoiceTranscriptionResponse(BaseModel):
+    text: str
+    language: str
+    confidence: float | None = None
+
+
+class VoiceQueryResponse(BaseModel):
+    transcript: str
+    language: str
+    intent: str
+    response: str
+    data: dict[str, Any]
+
+
+class VoiceSynthesisRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=2500)
+    language: str = Field(default="en")
+
+
+class VoiceHealthResponse(BaseModel):
+    sarvam_configured: bool
+    transcription_available: bool
+    tts_available: bool
 
 
 class MerchantProfile(BaseModel):
@@ -24,3 +62,73 @@ class InventoryItem(BaseModel):
     reorder_level: int
     last_updated: str
     source: str
+
+
+class CustomerMetrics(BaseModel):
+    customer_id: str
+    total_orders: int
+    total_spend: float
+    average_order_value: float
+    first_purchase_date: str
+    last_purchase_date: str
+    purchase_frequency: float
+    days_since_last_purchase: int
+    favorite_category: str | None = None
+    favorite_product: str | None = None
+    total_quantity_purchased: int
+    segment: str
+    segment_reason: str
+
+
+class CustomerPurchase(BaseModel):
+    invoice_id: str
+    invoice_date: str
+    category: str | None = None
+    product: str | None = None
+    quantity: int
+    spend: float
+
+
+class CustomerDetail(CustomerMetrics):
+    recent_purchases: list[CustomerPurchase]
+    customer_insight: str
+
+
+class CustomerListResponse(BaseModel):
+    items: list[CustomerMetrics]
+    total: int
+    limit: int
+    offset: int
+
+
+class CustomerSummaryResponse(BaseModel):
+    total_customers: int
+    new_customers: int
+    loyal_customers: int
+    high_value_customers: int
+    at_risk_customers: int
+    methodology: dict[str, Any]
+
+
+class CustomerSegmentCount(BaseModel):
+    segment: str
+    count: int
+
+
+class CustomerSegmentsResponse(BaseModel):
+    items: list[CustomerSegmentCount]
+    methodology: dict[str, Any]
+
+
+class CustomerRecommendation(BaseModel):
+    customer_id: str
+    priority: str
+    reason: str
+    recommended_action: str
+    total_spend: float
+    segment: str
+
+
+class CustomerRecommendationsResponse(BaseModel):
+    items: list[CustomerRecommendation]
+    methodology: dict[str, Any]

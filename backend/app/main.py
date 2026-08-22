@@ -2,11 +2,27 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from .config import Settings, get_settings
-from .models import AskRequest, InventoryUpdateRequest, MerchantProfile
-from .services.customer_intelligence_service import CustomerIntelligenceService
+from .models import (
+    AIChatRequest,
+    AIChatResponse,
+    AskRequest,
+    CustomerDetail,
+    CustomerListResponse,
+    CustomerRecommendationsResponse,
+    CustomerSegmentsResponse,
+    CustomerSummaryResponse,
+    InventoryUpdateRequest,
+    MerchantProfile,
+    VoiceHealthResponse,
+    VoiceQueryResponse,
+    VoiceSynthesisRequest,
+    VoiceTranscriptionResponse,
+)
+from .services.customer_intelligence_service import CustomerIntelligenceService, CustomerNotFoundError
 from .services.data_service import DataService
 from .services.forecasting_service import ForecastingService
 from .services.inventory_service import InventoryService
@@ -14,6 +30,12 @@ from .services.llm import get_llm_provider
 from .services.ocr import get_ocr_provider
 from .services.smart_inventory_service import ProductNotFoundError, SmartInventoryService
 from .services.transaction_data_service import TransactionDataError, TransactionDataService
+from .services.voice_ai_service import (
+    BusinessAIService,
+    SarvamClient,
+    VoiceAIError,
+    validate_audio,
+)
 from db.database import DatabaseConnectionError, check_database_connection, get_connected_database_name, get_db
 from db.schemas import DatabaseHealth
 
@@ -50,6 +72,19 @@ def get_smart_inventory_service(
     return SmartInventoryService(db, transaction_data, forecasting_service)
 
 
+def get_sarvam_client(settings: Settings = Depends(get_settings)) -> SarvamClient:
+    return SarvamClient(settings.sarvam_api_key, settings.sarvam_base_url, settings.sarvam_timeout_seconds)
+
+
+def get_business_ai_service(
+    data_service: DataService = Depends(get_data_service),
+    forecasting_service: ForecastingService = Depends(get_forecasting_service),
+    inventory_ai: SmartInventoryService = Depends(get_smart_inventory_service),
+    customer_service: CustomerIntelligenceService = Depends(get_customer_intelligence_service),
+) -> BusinessAIService:
+    return BusinessAIService(data_service, forecasting_service, inventory_ai, customer_service)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     check_database_connection()
@@ -82,6 +117,66 @@ def database_health() -> DatabaseHealth:
     return DatabaseHealth(status="ok", database=get_connected_database_name())
 
 
+@app.get("/api/voice/health", response_model=VoiceHealthResponse)
+def voice_health(sarvam: SarvamClient = Depends(get_sarvam_client)) -> dict:
+    return sarvam.health()
+
+
+@app.post("/api/voice/transcribe", response_model=VoiceTranscriptionResponse)
+async def voice_transcribe(
+    file: UploadFile = File(...),
+    language: str | None = Query(default=None),
+    sarvam: SarvamClient = Depends(get_sarvam_client),
+) -> dict:
+    content = await file.read()
+    try:
+        audio = validate_audio(file.filename, file.content_type, content)
+        return sarvam.transcribe(audio, language)
+    except VoiceAIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/voice/query", response_model=VoiceQueryResponse)
+async def voice_query(
+    file: UploadFile = File(...),
+    language: str | None = Query(default="en"),
+    sarvam: SarvamClient = Depends(get_sarvam_client),
+    business_ai: BusinessAIService = Depends(get_business_ai_service),
+) -> dict:
+    content = await file.read()
+    try:
+        audio = validate_audio(file.filename, file.content_type, content)
+        transcription = sarvam.transcribe(audio, language)
+        return business_ai.voice_query(transcription["text"], transcription["language"])
+    except VoiceAIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except (ValueError, TransactionDataError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/voice/synthesize")
+def voice_synthesize(payload: VoiceSynthesisRequest, sarvam: SarvamClient = Depends(get_sarvam_client)) -> Response:
+    try:
+        audio, media_type = sarvam.synthesize(payload.text, payload.language)
+        return Response(content=audio, media_type=media_type)
+    except VoiceAIError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/ai/chat", response_model=AIChatResponse)
+def ai_chat(payload: AIChatRequest, business_ai: BusinessAIService = Depends(get_business_ai_service)) -> dict:
+    try:
+        return business_ai.chat(payload.message, payload.language)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TransactionDataError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.get("/api/merchant")
 def merchant() -> MerchantProfile:
     return MerchantProfile(
@@ -110,28 +205,48 @@ def health_score(
 
 @app.get("/api/forecast")
 def forecast(
-    horizon: int = Query(default=7),
+    days: int = Query(default=7, ge=1, le=30),
+    horizon: int | None = Query(default=None, ge=1, le=30),
+    category: str | None = Query(default=None),
+    start_date: str | None = Query(default=None),
+    end_date: str | None = Query(default=None),
     forecasting_service: ForecastingService = Depends(get_forecasting_service),
 ) -> dict:
     try:
-        return forecasting_service.forecast(horizon)
+        return forecasting_service.forecast(horizon or days, category, start_date, end_date)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TransactionDataError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.get("/api/customers")
-def customers(data_service: DataService = Depends(get_data_service)) -> dict:
-    return data_service.customer_intelligence()
-
-
-@app.get("/api/customers/summary")
+@app.get("/api/customers/summary", response_model=CustomerSummaryResponse)
 def customer_summary(customer_service: CustomerIntelligenceService = Depends(get_customer_intelligence_service)) -> dict:
-    return customer_service.summary()
+    return _customer_response(customer_service.summary)
 
 
-@app.get("/api/customers/segments")
-def customer_segments(customer_service: CustomerIntelligenceService = Depends(get_customer_intelligence_service)) -> list[dict]:
-    return customer_service.segments()
+@app.get("/api/customers/segments", response_model=CustomerSegmentsResponse)
+def customer_segments(customer_service: CustomerIntelligenceService = Depends(get_customer_intelligence_service)) -> dict:
+    return _customer_response(customer_service.segments)
+
+
+@app.get("/api/customers/recommendations", response_model=CustomerRecommendationsResponse)
+def customer_recommendations(
+    limit: int = Query(default=20, ge=1, le=100),
+    customer_service: CustomerIntelligenceService = Depends(get_customer_intelligence_service),
+) -> dict:
+    return _customer_response(customer_service.recommendations, limit)
+
+
+@app.get("/api/customers", response_model=CustomerListResponse)
+def customers(
+    segment: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    customer_service: CustomerIntelligenceService = Depends(get_customer_intelligence_service),
+) -> dict:
+    return _customer_response(customer_service.list_customers, segment, search, limit, offset)
 
 
 @app.get("/api/customers/top")
@@ -168,6 +283,14 @@ def customer_insights(customer_service: CustomerIntelligenceService = Depends(ge
 @app.get("/api/customers/value")
 def customer_value(customer_service: CustomerIntelligenceService = Depends(get_customer_intelligence_service)) -> dict:
     return customer_service.value_summary()
+
+
+@app.get("/api/customers/{customer_id}", response_model=CustomerDetail)
+def customer_detail(
+    customer_id: str,
+    customer_service: CustomerIntelligenceService = Depends(get_customer_intelligence_service),
+) -> dict:
+    return _customer_response(customer_service.customer_detail, customer_id)
 
 
 @app.get("/api/transactions/profile")
@@ -285,6 +408,17 @@ def _inventory_response(handler, *args) -> dict:
     try:
         return handler(*args)
     except ProductNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except TransactionDataError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _customer_response(handler, *args) -> dict:
+    try:
+        return handler(*args)
+    except CustomerNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

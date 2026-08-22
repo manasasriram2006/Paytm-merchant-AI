@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     ocr_provider: str = "mock"
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     database_url: str | None = Field(default=None, alias="DATABASE_URL")
+    sarvam_api_key: str | None = Field(default=None, alias="SARVAM_API_KEY")
+    sarvam_base_url: str = Field(default="https://api.sarvam.ai", alias="SARVAM_BASE_URL")
+    sarvam_timeout_seconds: int = Field(default=30, alias="SARVAM_TIMEOUT_SECONDS")
 
     class Config:
         env_file = (Path(__file__).resolve().parents[2] / ".env", Path(__file__).resolve().parents[1] / ".env")

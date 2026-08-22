@@ -11,7 +11,10 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from .transaction_data_service import TransactionDataService, _round_money
 
 
-ALLOWED_HORIZONS = {7, 14, 30}
+DEFAULT_FORECAST_DAYS = 7
+MIN_FORECAST_DAYS = 1
+MAX_FORECAST_DAYS = 30
+RECENT_WINDOW_DAYS = 14
 FEATURE_COLUMNS = [
     "day_of_week",
     "day_of_month",
@@ -34,27 +37,41 @@ class ForecastingError(RuntimeError):
 class ForecastingService:
     transaction_data: TransactionDataService
 
-    def forecast(self, horizon: int = 7) -> dict[str, Any]:
-        if horizon not in ALLOWED_HORIZONS:
-            raise ValueError("horizon must be one of: 7, 14, 30")
+    def forecast(
+        self,
+        horizon: int = DEFAULT_FORECAST_DAYS,
+        category: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> dict[str, Any]:
+        horizon = validate_forecast_days(horizon)
+        start, end = validate_date_range(start_date, end_date)
 
-        daily = self._daily_history()
+        daily = self._daily_history(category=category, start_date=start, end_date=end)
         if len(daily) < 14:
-            return self._insufficient_data(horizon, daily)
+            return self._insufficient_data(horizon, daily, category)
 
         revenue_result = self._forecast_series(daily, "revenue", horizon)
         units_result = self._forecast_series(daily, "units", horizon)
+        confidence = self._confidence(revenue_result["metrics"], units_result["metrics"])
         forecast_items = []
         for revenue_item, units_item in zip(revenue_result["forecast"], units_result["forecast"], strict=True):
+            forecast_date = pd.Timestamp(revenue_item["date"])
+            predicted_revenue = _round_money(revenue_item["value"])
+            predicted_units = int(round(units_item["value"]))
             forecast_items.append(
                 {
                     "date": revenue_item["date"],
-                    "revenue": _round_money(revenue_item["value"]),
-                    "units": int(round(units_item["value"])),
+                    "day_of_week": forecast_date.day_name(),
+                    "predicted_revenue": predicted_revenue,
+                    "predicted_units": predicted_units,
+                    "revenue": predicted_revenue,
+                    "units": predicted_units,
                     "lower_bound": _round_money(revenue_item["lower_bound"]),
                     "upper_bound": _round_money(revenue_item["upper_bound"]),
                     "units_lower_bound": max(0, int(round(units_item["lower_bound"]))),
                     "units_upper_bound": max(0, int(round(units_item["upper_bound"]))),
+                    "confidence": confidence,
                 }
             )
 
@@ -64,9 +81,25 @@ class ForecastingService:
             else "weekly_average_fallback"
         )
 
+        historical_summary = self._historical_summary(daily)
+        weekend_insight = self._weekend_insight(daily, forecast_items)
+        category_forecast = self._category_forecast(horizon, category, start, end)
+        explanation = self._explanation(historical_summary, weekend_insight, forecast_items)
+
         return {
+            "forecast_period": {"days": horizon, "start_date": forecast_items[0]["date"], "end_date": forecast_items[-1]["date"]},
+            "historical_summary": historical_summary,
+            "daily_forecast": forecast_items,
+            "weekend_insight": weekend_insight,
+            "category_forecast": category_forecast,
+            "product_forecast_available": False,
+            "product_forecast_reason": "The current dataset has Brand values but no stable merchant SKU or product_id history for reliable product-level forecasts.",
+            "model": method,
+            "confidence": confidence,
+            "explanation": explanation,
             "forecast_method": method,
             "horizon": horizon,
+            "category": category,
             "historical": self._historical_records(daily),
             "forecast": forecast_items,
             "metrics": {
@@ -75,7 +108,7 @@ class ForecastingService:
             },
             "summary": self._summary(forecast_items),
             "insights": self._insights(forecast_items),
-            "model": {
+            "model_details": {
                 "features": FEATURE_COLUMNS,
                 "validation": "chronological holdout using the latest historical period",
                 "historical_days": int(len(daily)),
@@ -83,8 +116,18 @@ class ForecastingService:
             "note": "Forecast uses representative FMCG retail data and does not represent live Paytm production transactions.",
         }
 
-    def _daily_history(self) -> pd.DataFrame:
-        df = self.transaction_data.dataframe()
+    def _daily_history(self, category: str | None = None, start_date: str | None = None, end_date: str | None = None) -> pd.DataFrame:
+        df = self.transaction_data.filtered_dataframe(start_date, end_date)
+        self._validate_history_frame(df)
+        if category:
+            if "Category" not in df.columns:
+                raise ValueError("category filtering is unavailable because Category is missing from the dataset")
+            category_mask = df["Category"].fillna("").str.casefold() == category.casefold()
+            if not category_mask.any():
+                raise ValueError(f"category not found: {category}")
+            df = df.loc[category_mask].copy()
+        if df.empty:
+            return pd.DataFrame(columns=["date", "revenue", "units"])
         daily = (
             df.set_index("Invoice_Date")
             .resample("D")
@@ -96,6 +139,69 @@ class ForecastingService:
         daily["revenue"] = daily["revenue"].astype(float)
         daily["units"] = daily["units"].astype(float)
         return daily
+
+    @staticmethod
+    def _validate_history_frame(df: pd.DataFrame) -> None:
+        if df.empty:
+            return
+        missing = sorted({"Invoice_Date", "Revenue", "Units"} - set(df.columns))
+        if missing:
+            raise ValueError(f"forecasting dataset is missing required columns: {missing}")
+        if df[["Invoice_Date", "Revenue", "Units"]].isna().any().any():
+            raise ValueError("forecasting dataset contains missing date, revenue, or units values")
+        if not pd.api.types.is_datetime64_any_dtype(df["Invoice_Date"]):
+            parsed_dates = pd.to_datetime(df["Invoice_Date"], errors="coerce")
+            if parsed_dates.isna().any():
+                raise ValueError("forecasting dataset contains malformed Invoice_Date values")
+            df["Invoice_Date"] = parsed_dates
+        for column in ["Revenue", "Units"]:
+            numeric = pd.to_numeric(df[column], errors="coerce")
+            if numeric.isna().any():
+                raise ValueError(f"forecasting dataset contains malformed {column} values")
+            df[column] = numeric
+
+    def _category_forecast(
+        self,
+        horizon: int,
+        selected_category: str | None,
+        start_date: str | None,
+        end_date: str | None,
+    ) -> list[dict[str, Any]]:
+        df = self.transaction_data.filtered_dataframe(start_date, end_date)
+        if df.empty or "Category" not in df.columns:
+            return []
+        if selected_category:
+            df = df.loc[df["Category"].fillna("").str.casefold() == selected_category.casefold()].copy()
+        if df.empty:
+            return []
+
+        records = []
+        for category, group in df.groupby("Category"):
+            daily = (
+                group.set_index("Invoice_Date")
+                .resample("D")
+                .agg(units=("Units", "sum"))
+                .reset_index()
+                .sort_values("Invoice_Date")
+            )
+            if len(daily) < 7:
+                continue
+            historical_average = float(daily["units"].mean())
+            recent_average = float(daily["units"].tail(RECENT_WINDOW_DAYS).mean())
+            previous = daily["units"].iloc[-RECENT_WINDOW_DAYS * 2 : -RECENT_WINDOW_DAYS]
+            previous_average = float(previous.mean()) if len(previous) else historical_average
+            trend_percent = _growth_percent(recent_average, previous_average)
+            forecast_daily = max(0.0, recent_average if trend_percent is None else recent_average * (1 + trend_percent / 100))
+            records.append(
+                {
+                    "category": str(category),
+                    "historical_average": round(historical_average, 2),
+                    "forecast_demand": round(forecast_daily * horizon, 2),
+                    "expected_change_percent": trend_percent,
+                    "trend": _trend_label(trend_percent),
+                }
+            )
+        return sorted(records, key=lambda item: item["forecast_demand"], reverse=True)
 
     def _forecast_series(self, daily: pd.DataFrame, target: str, horizon: int) -> dict[str, Any]:
         prepared = self._feature_frame(daily[["date", target]].rename(columns={target: "target"}))
@@ -251,6 +357,60 @@ class ForecastingService:
         }
 
     @staticmethod
+    def _historical_summary(daily: pd.DataFrame) -> dict[str, Any]:
+        average_revenue = float(daily["revenue"].mean()) if len(daily) else 0.0
+        recent_average = float(daily["revenue"].tail(RECENT_WINDOW_DAYS).mean()) if len(daily) else 0.0
+        previous = daily["revenue"].iloc[-RECENT_WINDOW_DAYS * 2 : -RECENT_WINDOW_DAYS]
+        previous_average = float(previous.mean()) if len(previous) else average_revenue
+        return {
+            "average_daily_revenue": _round_money(average_revenue),
+            "recent_average_daily_revenue": _round_money(recent_average),
+            "average_daily_units": round(float(daily["units"].mean()), 2) if len(daily) else 0,
+            "recent_average_daily_units": round(float(daily["units"].tail(RECENT_WINDOW_DAYS).mean()), 2) if len(daily) else 0,
+            "trend_percent": _growth_percent(recent_average, previous_average),
+            "trend": _trend_label(_growth_percent(recent_average, previous_average)),
+            "historical_days": int(len(daily)),
+        }
+
+    @staticmethod
+    def _weekend_insight(daily: pd.DataFrame, forecast: list[dict[str, Any]]) -> dict[str, Any]:
+        if not forecast:
+            return {"expected_change_percent": None, "direction": "insufficient_data", "message": "Not enough forecast data to compare weekend demand."}
+        frame = pd.DataFrame(forecast)
+        frame["date"] = pd.to_datetime(frame["date"])
+        weekend_forecast = frame[frame["date"].dt.dayofweek.isin([5, 6])]["predicted_revenue"]
+        recent_weekday = daily[~daily["date"].dt.dayofweek.isin([5, 6])]["revenue"].tail(RECENT_WINDOW_DAYS)
+        if weekend_forecast.empty or recent_weekday.empty:
+            return {"expected_change_percent": None, "direction": "insufficient_data", "message": "Not enough weekend or weekday history to compare demand."}
+        change = _growth_percent(float(weekend_forecast.mean()), float(recent_weekday.mean()))
+        direction = _direction(change)
+        return {
+            "expected_change_percent": change,
+            "direction": direction,
+            "message": f"Weekend demand is expected to {direction} compared with the recent weekday average.",
+        }
+
+    @staticmethod
+    def _confidence(revenue_metrics: dict[str, float | None], units_metrics: dict[str, float | None]) -> float:
+        mape_values = [metric.get("mape") for metric in [revenue_metrics, units_metrics] if metric.get("mape") is not None]
+        if not mape_values:
+            return 0.55
+        average_mape = float(np.mean(mape_values))
+        return round(float(np.clip(1 - average_mape / 100, 0.35, 0.95)), 2)
+
+    @staticmethod
+    def _explanation(historical_summary: dict[str, Any], weekend_insight: dict[str, Any], forecast: list[dict[str, Any]]) -> str:
+        trend = historical_summary.get("trend", "stable")
+        recent = historical_summary.get("recent_average_daily_revenue", 0)
+        expected = _round_money(np.mean([item["predicted_revenue"] for item in forecast])) if forecast else 0
+        weekend_direction = weekend_insight.get("direction", "stable")
+        return (
+            f"Sales show a {trend} recent trend: recent average daily revenue is {recent}, "
+            f"and the next forecast window averages {expected} per day. "
+            f"Weekend demand is expected to {weekend_direction} versus the recent weekday average."
+        )
+
+    @staticmethod
     def _insights(forecast: list[dict[str, Any]]) -> list[str]:
         if not forecast:
             return []
@@ -279,19 +439,88 @@ class ForecastingService:
         return insights
 
     @staticmethod
-    def _insufficient_data(horizon: int, daily: pd.DataFrame) -> dict[str, Any]:
+    def _insufficient_data(horizon: int, daily: pd.DataFrame, category: str | None = None) -> dict[str, Any]:
+        message = "Not enough historical sales data to generate a reliable forecast."
         return {
+            "forecast_period": {"days": horizon},
+            "historical_summary": ForecastingService._historical_summary(daily),
+            "daily_forecast": [],
+            "weekend_insight": {"expected_change_percent": None, "direction": "insufficient_data", "message": message},
+            "category_forecast": [],
+            "product_forecast_available": False,
+            "product_forecast_reason": "Insufficient historical data for product-level forecasting.",
+            "model": "insufficient_data",
+            "confidence": 0.0,
+            "explanation": message,
             "forecast_method": "insufficient_data",
             "horizon": horizon,
+            "category": category,
             "historical": ForecastingService._historical_records(daily),
             "forecast": [],
             "metrics": {"revenue": ForecastingService._empty_metrics(), "units": ForecastingService._empty_metrics()},
             "summary": {},
             "insights": [],
-            "model": {
+            "model_details": {
                 "features": FEATURE_COLUMNS,
                 "validation": "not enough historical days for chronological validation",
                 "historical_days": int(len(daily)),
             },
-            "message": "Not enough historical sales data to generate a reliable forecast.",
+            "message": message,
         }
+
+
+def validate_forecast_days(days: int) -> int:
+    try:
+        parsed = int(days)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("days must be an integer") from exc
+    if parsed < MIN_FORECAST_DAYS or parsed > MAX_FORECAST_DAYS:
+        raise ValueError(f"days must be between {MIN_FORECAST_DAYS} and {MAX_FORECAST_DAYS}")
+    return parsed
+
+
+def validate_date_range(start_date: str | None, end_date: str | None) -> tuple[str | None, str | None]:
+    start = _parse_date_filter(start_date, "start_date")
+    end = _parse_date_filter(end_date, "end_date")
+    if start is not None and end is not None and start > end:
+        raise ValueError("start_date must be before or equal to end_date")
+    end_of_day = end + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1) if end is not None and end.time() == pd.Timestamp.min.time() else end
+    return (
+        start.isoformat() if start is not None else None,
+        end_of_day.isoformat() if end_of_day is not None else None,
+    )
+
+
+def _parse_date_filter(value: str | None, name: str) -> pd.Timestamp | None:
+    if value is None:
+        return None
+    try:
+        return pd.to_datetime(value, errors="raise")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a valid date") from exc
+
+
+def _growth_percent(current: float, previous: float) -> float | None:
+    if previous == 0:
+        return None
+    return round((current - previous) / previous * 100, 2)
+
+
+def _trend_label(change_percent: float | None) -> str:
+    if change_percent is None:
+        return "stable"
+    if change_percent > 3:
+        return "increase"
+    if change_percent < -3:
+        return "decrease"
+    return "stable"
+
+
+def _direction(change_percent: float | None) -> str:
+    if change_percent is None:
+        return "stable"
+    if change_percent > 1:
+        return "increase"
+    if change_percent < -1:
+        return "decrease"
+    return "remain stable"
