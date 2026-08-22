@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { AppHeader, PrimaryButton } from '../components/ui';
 import { colors, radius, spacing } from '../constants/theme';
@@ -65,8 +65,9 @@ export function InventoryAiScreen() {
   </ScrollView>;
 }
 
-function Loading() { return <View style={s.state}><ActivityIndicator size="large" color={colors.primary} /><Text style={s.muted}>Loading inventory…</Text></View>; }
-function StateMessage({ title, message, button, onPress }: { title: string; message?: string; button: string; onPress: () => void }) { return <View style={s.state}><Text style={s.stateTitle}>{title}</Text>{message && <Text style={s.muted}>{message}</Text>}<PrimaryButton label={button} onPress={onPress} /></View>; }
+function InventoryState({ children }: { children: ReactNode }) { return <ScrollView contentContainerStyle={s.page}><AppHeader title="Inventory AI" subtitle="Know what to restock before you run out." /><View style={s.state}>{children}</View></ScrollView>; }
+function Loading() { return <InventoryState><ActivityIndicator size="large" color={colors.primary} /><Text style={s.muted}>Loading inventory…</Text></InventoryState>; }
+function StateMessage({ title, message, button, onPress }: { title: string; message?: string; button: string; onPress: () => void }) { return <InventoryState><Text style={s.stateTitle}>{title}</Text>{message && <Text style={s.muted}>{message}</Text>}<PrimaryButton label={button} onPress={onPress} /></InventoryState>; }
 function SummaryCard({ label, value, danger }: { label: string; value: number | string; danger?: boolean }) { return <View style={s.summaryCard}><Text style={s.summaryLabel}>{label}</Text><Text style={[s.summaryValue, danger && s.dangerText]}>{value}</Text></View>; }
 function Alerts({ risks }: { risks?: InventoryRisk[] }) { if (!risks?.length) return <View style={s.emptyCard}><Text style={s.muted}>No inventory alerts are available from the backend.</Text></View>; return <View style={s.alertList}>{risks.slice(0, 3).map((risk, index) => <View key={`${risk.Brand ?? risk.Category ?? 'risk'}-${index}`} style={s.alert}><Text style={s.alertTitle}>{risk.Brand ?? risk.Category ?? 'Inventory item requires attention'}</Text><Text style={s.muted}>{risk.Stock_On_Hand !== undefined && risk.Reorder_Level !== undefined ? `Current stock: ${risk.Stock_On_Hand} · Reorder level: ${risk.Reorder_Level}` : 'Inventory risk reported by the backend.'}</Text></View>)}</View>; }
 function ProductRow({ item, onPress }: { item: InventoryItem; onPress: () => void }) { const status = statusOf(item); return <Pressable accessibilityRole="button" onPress={onPress} style={s.product}><View style={s.productTop}><Text style={s.productName}>{item.name}</Text><Text style={[s.pill, status === 'Critical' ? s.critical : status === 'Low Stock' ? s.low : s.healthy]}>{status}</Text></View><Text style={s.muted}>Current stock: {item.current_stock}</Text><Text style={s.detail}>Reorder level: {item.reorder_level}</Text></Pressable>; }

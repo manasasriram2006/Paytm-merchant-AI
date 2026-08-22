@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import type { Tab } from '../components/BottomNavigation';
+import type { Route } from '../components/BottomNavigation';
 import type { MorePage } from './MoreScreen';
 import { AppHeader, PrimaryButton, SecondaryButton } from '../components/ui';
 import { colors, radius, spacing } from '../constants/theme';
@@ -10,7 +10,7 @@ import type { BusinessAlert, HomeOverview } from '../types/business';
 type LoadState = 'loading' | 'success' | 'empty' | 'error';
 const currency = (value?: number) => value === undefined ? '—' : `₹${value.toLocaleString('en-IN')}`;
 
-export function BusinessOverviewScreen({ onNavigate, onOpenMore }: { onNavigate: (tab: Tab) => void; onOpenMore: (page: MorePage) => void }) {
+export function BusinessOverviewScreen({ onNavigate, onOpenMore }: { onNavigate: (tab: Route) => void; onOpenMore: (page: MorePage) => void }) {
   const [state, setState] = useState<LoadState>('loading');
   const [overview, setOverview] = useState<HomeOverview>();
   const load = useCallback(async () => { setState('loading'); try { const result = await api.getHomeOverview(); setOverview(result); setState(result.businessHealth || result.todaySales !== undefined || result.alerts.length ? 'success' : 'empty'); } catch { setState('error'); } }, []);

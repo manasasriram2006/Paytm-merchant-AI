@@ -43,3 +43,27 @@ export type ForecastResponse = {
   note?: string;
   message?: string;
 };
+
+export type CustomerSummary = {
+  total_customers?: number;
+  active_customers?: number;
+  repeat_customers?: number;
+  at_risk_customers?: number;
+  repeat_customer_rate?: number;
+  definitions?: { active_customer?: string; at_risk_customer?: string; repeat_customer?: string };
+  note?: string;
+};
+export type CustomerRecord = {
+  customer_id: string | number;
+  total_revenue?: number;
+  transaction_count?: number;
+  total_units?: number;
+  first_purchase_date?: string;
+  last_purchase_date?: string;
+  days_since_purchase?: number;
+  /** Backend RFM segment; the source for customer status shown in the app. */
+  segment?: string;
+};
+export type CustomerInsight = { type?: string; message?: string; value?: number };
+export type AtRiskCustomersResponse = { explanation?: string; items?: CustomerRecord[] };
+export type CustomerSegment = { segment?: string; customer_count?: number; percentage?: number; total_revenue?: number; average_revenue?: number };
