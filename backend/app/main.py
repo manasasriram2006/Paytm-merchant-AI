@@ -12,6 +12,7 @@ from .services.forecasting_service import ForecastingService
 from .services.inventory_service import InventoryService
 from .services.llm import get_llm_provider
 from .services.ocr import get_ocr_provider
+from .services.smart_inventory_service import ProductNotFoundError, SmartInventoryService
 from .services.transaction_data_service import TransactionDataError, TransactionDataService
 from db.database import DatabaseConnectionError, check_database_connection, get_connected_database_name, get_db
 from db.schemas import DatabaseHealth
@@ -39,6 +40,14 @@ def get_customer_intelligence_service(
 
 def get_inventory_service(db: Session = Depends(get_db)) -> InventoryService:
     return InventoryService(db)
+
+
+def get_smart_inventory_service(
+    db: Session = Depends(get_db),
+    transaction_data: TransactionDataService = Depends(get_transaction_data_service),
+    forecasting_service: ForecastingService = Depends(get_forecasting_service),
+) -> SmartInventoryService:
+    return SmartInventoryService(db, transaction_data, forecasting_service)
 
 
 @asynccontextmanager
@@ -238,11 +247,47 @@ def inventory_data_summary(transaction_data: TransactionDataService = Depends(ge
     return _transaction_response(transaction_data.inventory_data_summary)
 
 
+@app.get("/api/inventory/summary")
+def inventory_summary(inventory_ai: SmartInventoryService = Depends(get_smart_inventory_service)) -> dict:
+    return _inventory_response(inventory_ai.summary)
+
+
+@app.get("/api/inventory/alerts")
+def inventory_alerts(
+    risk: str | None = Query(default=None),
+    category: str | None = Query(default=None),
+    limit: int | None = Query(default=None, ge=1, le=100),
+    inventory_ai: SmartInventoryService = Depends(get_smart_inventory_service),
+) -> dict:
+    return _inventory_response(inventory_ai.alerts, risk, category, limit)
+
+
+@app.get("/api/inventory/recommendations")
+def inventory_recommendations(inventory_ai: SmartInventoryService = Depends(get_smart_inventory_service)) -> dict:
+    return _inventory_response(inventory_ai.recommendations)
+
+
+@app.get("/api/inventory/product/{product_id}")
+def inventory_product(product_id: int, inventory_ai: SmartInventoryService = Depends(get_smart_inventory_service)) -> dict:
+    return _inventory_response(inventory_ai.product_detail, product_id)
+
+
 def _transaction_response(handler, *args) -> dict:
     try:
         return handler(*args)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid date filter: {exc}") from exc
+    except TransactionDataError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _inventory_response(handler, *args) -> dict:
+    try:
+        return handler(*args)
+    except ProductNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except TransactionDataError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
